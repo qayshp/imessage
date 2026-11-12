@@ -77,6 +77,11 @@ func (mq *MessageQuery) GetByGUID(chat string, guid string, part int) *Message {
 		"FROM message WHERE portal_guid=$1 AND guid=$2 AND part=$3", chat, guid, part)
 }
 
+// GetByGUIDAnyChat preserves deduplication when a conversation was merged or renamed.
+func (mq *MessageQuery) GetByGUIDAnyChat(guid string, part int) *Message {
+	return mq.get("SELECT portal_guid, guid, part, mxid, sender_guid, handle_guid, timestamp FROM message WHERE guid=$1 AND part=$2 LIMIT 1", guid, part)
+}
+
 func (mq *MessageQuery) GetByMXID(mxid id.EventID) *Message {
 	return mq.get("SELECT portal_guid, guid, part, mxid, sender_guid, handle_guid, timestamp "+
 		"FROM message WHERE mxid=$1", mxid)

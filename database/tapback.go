@@ -51,6 +51,10 @@ func (mq *TapbackQuery) GetByTapbackGUID(chat, tapback string) *Tapback {
 		chat, tapback)
 }
 
+func (mq *TapbackQuery) GetByTapbackGUIDAnyChat(guid string) *Tapback {
+	return mq.get("SELECT portal_guid, guid, message_guid, message_part, sender_guid, handle_guid, type, mxid FROM tapback WHERE guid=$1 LIMIT 1", guid)
+}
+
 func (mq *TapbackQuery) GetByMXID(mxid id.EventID) *Tapback {
 	return mq.get("SELECT portal_guid, guid, message_guid, message_part, sender_guid, handle_guid, type, mxid "+
 		"FROM tapback WHERE mxid=$1", mxid)

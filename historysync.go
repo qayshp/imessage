@@ -85,7 +85,16 @@ func (portal *Portal) forwardBackfill() {
 	var err error
 	var backfillID string
 	lastMessage := portal.bridge.DB.Message.GetLastInChat(portal.GUID)
-	if lastMessage == nil && portal.BackfillStartTS == 0 {
+	recoveryStart, repair, recoveryErr := configuredRecoveryStart(portal.GUID)
+	if recoveryErr != nil {
+		portal.log.Errorfln("Invalid recovery plan: %v", recoveryErr)
+		return
+	}
+	if repair {
+		backfillID = fmt.Sprintf("bridge-repair-%s::%d", portal.Identifier.LocalID, time.Now().UnixMilli())
+		portal.log.Infofln("Checking recovery window since %s", recoveryStart.Format(time.RFC3339))
+		messages, err = portal.bridge.IM.GetMessagesSinceDate(portal.GUID, recoveryStart, backfillID)
+	} else if lastMessage == nil && portal.BackfillStartTS == 0 {
 		if portal.bridge.Config.Bridge.Backfill.InitialLimit <= 0 {
 			portal.log.Debugfln("Not backfilling: initial limit is 0")
 			return
@@ -103,20 +112,10 @@ func (portal *Portal) forwardBackfill() {
 		backfillID = fmt.Sprintf("bridge-catchup-ts-%s::%d::%d", portal.Identifier.LocalID, startTime.UnixMilli(), time.Now().UnixMilli())
 		messages, err = portal.bridge.IM.GetMessagesSinceDate(portal.GUID, startTime, backfillID)
 	}
-	allSkipped := true
-	for index, msg := range messages {
-		if portal.bridge.DB.Message.GetByGUID(msg.ChatGUID, msg.GUID, 0) != nil {
-			portal.log.Debugfln("Skipping duplicate message %s at start of forward backfill batch", msg.GUID)
-			continue
-		}
-		allSkipped = false
-		messages = messages[index:]
-		break
-	}
 	if err != nil {
 		portal.log.Errorln("Failed to fetch messages for backfilling:", err)
 		go portal.bridge.IM.SendBackfillResult(portal.GUID, backfillID, false, nil)
-	} else if len(messages) == 0 || allSkipped {
+	} else if len(messages) == 0 {
 		portal.log.Debugln("Nothing to backfill")
 	} else {
 		portal.sendBackfill(backfillID, messages, true, false, false)
@@ -158,7 +157,10 @@ func (portal *Portal) convertBackfill(messages []*imessage.Message) ([]*event.Ev
 
 		intent := portal.getIntentForMessage(msg, nil)
 		converted := portal.convertiMessage(msg, intent)
-		for index, conv := range converted {
+		for _, index := range unrecordedPartIndexes(len(converted), func(part int) bool {
+			return portal.bridge.DB.Message.GetByGUIDAnyChat(msg.GUID, part) != nil
+		}) {
+			conv := converted[index]
 			evt := &event.Event{
 				Sender:    intent.UserID,
 				Type:      conv.Type,
@@ -199,6 +201,9 @@ func (portal *Portal) convertTapbacks(messages []*imessage.Message) ([]*event.Ev
 			continue
 		}
 
+		if portal.bridge.DB.Tapback.GetByTapbackGUIDAnyChat(msg.GUID) != nil {
+			continue
+		}
 		intent := portal.getIntentForMessage(msg, nil)
 		dbMessage := portal.bridge.DB.Message.GetByGUID(portal.GUID, msg.Tapback.TargetGUID, msg.Tapback.TargetPart)
 		if dbMessage == nil {
@@ -277,15 +282,15 @@ func (portal *Portal) sendBackfill(backfillID string, messages []*imessage.Messa
 		return false
 	}
 	portal.log.Debugfln("Converted %d messages into %d message events to backfill", len(messages), len(events))
-	if len(events) == 0 {
-		return true
+	var eventIDs []id.EventID
+	var sendErr error
+	if len(events) > 0 {
+		eventIDs, sendErr = portal.sendBackfillToMatrixServer(batchSending, forward, forwardIfNoMessages, markAsRead, isRead, events, metas, metaIndexes)
+		if sendErr != nil {
+			return false
+		}
+		portal.addBackfillToDB(metas, eventIDs, idMap, backfillID)
 	}
-
-	eventIDs, sendErr := portal.sendBackfillToMatrixServer(batchSending, forward, forwardIfNoMessages, markAsRead, isRead, events, metas, metaIndexes)
-	if sendErr != nil {
-		return false
-	}
-	portal.addBackfillToDB(metas, eventIDs, idMap, backfillID)
 
 	//We have to process tapbacks after all other messages because we need texts in the DB in order to target them
 	events, metas, metaIndexes, isRead, err = portal.convertTapbacks(validMessages)

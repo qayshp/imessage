@@ -620,6 +620,10 @@ func (bb *blueBubbles) GetMessagesSinceDate(chatID string, minDate time.Time, ba
 		return nil, err
 	}
 
+	messages, err = filterRepairMessages(messages, backfillID)
+	if err != nil {
+		return nil, err
+	}
 	for _, messsage := range messages {
 		imessage, err := bb.convertBBMessageToiMessage(messsage)
 		if err != nil {
@@ -1453,9 +1457,10 @@ func (bb *blueBubbles) apiGet(path string, queryParams map[string]string, target
 	url := bb.apiURL(path, queryParams)
 
 	bb.bbRequestLock.Lock()
-	response, err := http.Get(url)
+	response, err := apiHTTPClient.Get(url)
 	bb.bbRequestLock.Unlock()
 	if err != nil {
+		err = safeRequestError(err)
 		bb.log.Error().Err(err).Msg("Error making GET request")
 		return err
 	}
@@ -1686,15 +1691,15 @@ func (bb *blueBubbles) convertBBMessageToiMessage(bbMessage Message) (*imessage.
 	}
 
 	// Attachments
-	message.Attachments = make([]*imessage.Attachment, len(bbMessage.Attachments))
-	for i, attachment := range bbMessage.Attachments {
+	message.Attachments = make([]*imessage.Attachment, 0, len(bbMessage.Attachments))
+	for _, attachment := range bbMessage.Attachments {
 		attachment, err := bb.downloadAttachment(attachment.GUID)
 		if err != nil {
-			bb.log.Err(err).Str("attachmentGUID", attachment.GUID).Msg("Failed to download attachment")
-			continue
+			bb.log.Err(err).Msg("Failed to download message attachment; leaving it unrecorded for retry")
+			return nil, err
 		}
 
-		message.Attachments[i] = attachment
+		message.Attachments = append(message.Attachments, attachment)
 	}
 
 	// Group name, member, and avatar changes all come through as messages
@@ -1764,12 +1769,16 @@ func (bb *blueBubbles) downloadAttachment(guid string) (attachment *imessage.Att
 
 	url := bb.apiURL(fmt.Sprintf("/api/v1/attachment/%s/download", guid), map[string]string{})
 
-	response, err := http.Get(url)
+	response, err := attachmentHTTPClient.Get(url)
 	if err != nil {
+		err = safeRequestError(err)
 		bb.log.Error().Err(err).Msg("Error making GET request")
 		return nil, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("attachment request returned HTTP %d", response.StatusCode)
+	}
 
 	tempFile, err := os.CreateTemp(os.TempDir(), guid)
 	if err != nil {

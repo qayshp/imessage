@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -560,7 +561,25 @@ func (br *IMBridge) StartupSync() {
 	forceUpdateBridgeInfo := br.sendStatusUpdateInfo ||
 		br.DB.KV.Get(database.KVBridgeInfoVersion) != database.ExpectedBridgeInfoVersion
 	alreadySynced := make(map[string]bool)
-	for _, portal := range br.GetAllPortals() {
+	portals := br.GetAllPortals()
+	if filename := os.Getenv("MAUTRIX_IMESSAGE_RECOVERY_PLAN"); filename != "" {
+		data, err := os.ReadFile(filename)
+		if err != nil {
+			br.Log.Errorfln("Cannot read recovery plan: %v", err)
+			return
+		}
+		plan, err := parseRecoveryPlan(data, time.Now())
+		if err != nil {
+			br.Log.Errorfln("Invalid recovery plan: %v", err)
+			return
+		}
+		selected := make(map[string]bool, len(plan.Chats))
+		for _, chat := range plan.Chats {
+			selected[chat] = true
+		}
+		sort.SliceStable(portals, func(i, j int) bool { return selected[portals[i].GUID] && !selected[portals[j].GUID] })
+	}
+	for _, portal := range portals {
 		removed := portal.CleanupIfEmpty(true)
 		if !removed && len(portal.MXID) > 0 {
 			if br.Config.Bridge.DisableSMSPortals && portal.Identifier.Service == "SMS" && !portal.Identifier.IsGroup {
